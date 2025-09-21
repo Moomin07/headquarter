@@ -1605,6 +1605,7 @@
         setupServiceWorker();
         updateClock();
         setInterval(updateClock, 60000);
+        await loadLinkedFolderOnStartup();
       } catch (error) {
         handleError('Failed to initialize app', error);
       }
@@ -3681,6 +3682,22 @@
         }
         
         downloadBlob(blob, filename);
+        // also attempt to save the export to the linked local folder (if any)
+try {
+  const dirHandle = app.localFolderHandle || await getSetting('localFolderHandle', null);
+  if (dirHandle) {
+    const canWrite = await verifyPermission(dirHandle, true);
+    if (canWrite) {
+      await writeFileToFolder(dirHandle, filename, blob);
+      showToast('Also saved export to linked folder', 'success');
+    } else {
+      console.warn('No write permission for linked folder.');
+    }
+  }
+} catch (err) {
+  console.warn('Failed to save export to linked folder:', err);
+}
+
         showToast('Export completed successfully!', 'success');
         
       } catch (error) {
@@ -3754,6 +3771,110 @@
     // INITIALIZATION COMPLETE
     // ======================
     
+    // ----------------------
+// Local Folder Sync (File System Access API)
+// ----------------------
+async function verifyPermission(handle, withWrite = false) {
+  if (!handle) return false;
+  // new permission API: queryPermission / requestPermission
+  try {
+    const opts = withWrite ? { mode: 'readwrite' } : {};
+    if (typeof handle.queryPermission === 'function') {
+      let perm = await handle.queryPermission(opts);
+      if (perm === 'granted') return true;
+      perm = await handle.requestPermission(opts);
+      return perm === 'granted';
+    }
+    if (typeof handle.requestPermission === 'function') {
+      const perm = await handle.requestPermission(opts);
+      return perm === 'granted';
+    }
+  } catch (e) {
+    console.warn('Permission check failed', e);
+  }
+  // If API missing, assume it's allowed (best-effort)
+  return true;
+}
+
+async function writeFileToFolder(dirHandle, filename, blob) {
+  if (!dirHandle) throw new Error('No directory handle provided');
+  const safeName = sanitizeFilename(filename);
+  const fileHandle = await dirHandle.getFileHandle(safeName, { create: true });
+  const writable = await fileHandle.createWritable();
+  await writable.write(blob);
+  await writable.close();
+}
+
+async function linkLocalFolder() {
+  try {
+    // toggle/unlink if already linked
+    if (app.localFolderHandle) {
+      if (!confirm('Unlink local folder? This will stop automatic backups (files already saved will remain on disk).')) return;
+      await setSetting('localFolderHandle', null);
+      app.localFolderHandle = null;
+      updateFolderStatusUI();
+      showToast('Local folder unlinked', 'success');
+      return;
+    }
+
+    if (typeof window.showDirectoryPicker !== 'function') {
+      showToast('Linking local folder requires a Chromium browser (Chrome / Edge) and secure context (https or localhost).', 'error');
+      return;
+    }
+
+    const dirHandle = await window.showDirectoryPicker();
+    if (!dirHandle) return;
+
+    const ok = await verifyPermission(dirHandle, true);
+    if (!ok) {
+      showToast('Write permission is required to link this folder.', 'error');
+      return;
+    }
+
+    await setSetting('localFolderHandle', dirHandle);
+    app.localFolderHandle = dirHandle;
+    updateFolderStatusUI();
+    showToast('Local folder linked successfully', 'success');
+  } catch (err) {
+    handleError('Failed to link local folder', err);
+  }
+}
+
+async function loadLinkedFolderOnStartup() {
+  try {
+    const stored = await getSetting('localFolderHandle', null);
+    if (!stored) return;
+    // try to restore permission state; if denied, we still keep the handle and will ask on write
+    try {
+      await verifyPermission(stored, false);
+    } catch (e) {
+      console.warn('Stored folder permission check failed', e);
+    }
+    app.localFolderHandle = stored;
+    updateFolderStatusUI();
+  } catch (e) {
+    console.warn('loadLinkedFolderOnStartup failed', e);
+  }
+}
+
+function updateFolderStatusUI() {
+  const el = document.getElementById('folder-status');
+  if (!el) return;
+  const btn = document.querySelector('button[onclick="linkLocalFolder()"]');
+  if (app.localFolderHandle) {
+    const name = app.localFolderHandle.name || 'Linked folder';
+    el.innerHTML = `<div class="font-medium">Status: Linked (${escapeHtml(name)})</div><div class="text-sm text-muted">Automatic backup enabled</div>`;
+    if (btn) btn.textContent = 'Unlink Local Folder';
+  } else {
+    el.innerHTML = `<div class="font-medium">Status: Not linked</div><div class="text-sm text-muted">Link a folder to enable automatic backup</div>`;
+    if (btn) btn.textContent = 'Link Local Folder';
+  }
+}
+
+// expose so onclick in HTML can call it
+window.linkLocalFolder = linkLocalFolder;
+window.loadLinkedFolderOnStartup = loadLinkedFolderOnStartup;
+
     // Start the app when DOM is ready
     if (document.readyState === 'loading') {
       document.addEventListener('DOMContentLoaded', initializeApp);
