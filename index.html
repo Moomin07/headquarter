@@ -2346,6 +2346,9 @@
                 <button class="btn btn-secondary" onclick="exportData('zip')">
                   📦 Export as ZIP Archive
                 </button>
+                <button class="btn btn-secondary" onclick="testSingleImageExport()">
+  🧪 Test Export One Image
+</button>
                 <button class="btn btn-secondary" onclick="exportData('encrypted')">
                   🔒 Export Encrypted Backup
                 </button>
@@ -3648,25 +3651,68 @@
             break;
             
           case 'zip':
-            if (typeof JSZip === 'undefined') {
-              showToast('ZIP export requires JSZip library', 'error');
-              return;
-            }
-            
-            const zip = new JSZip();
-            zip.file('data.json', JSON.stringify(data, null, 2));
-            
-            // Add individual files for each note, bookmark, etc.
-            if (data.notes) {
-              const notesFolder = zip.folder('notes');
-              data.notes.forEach(note => {
-                notesFolder.file(`${note.id}-${sanitizeFilename(note.title || 'untitled')}.txt`, note.content || '');
-              });
-            }
-            
-            blob = await zip.generateAsync({ type: 'blob' });
-            filename = `moomin-hub-backup-${new Date().toISOString().slice(0, 10)}.zip`;
-            break;
+           if (typeof JSZip === 'undefined') {
+  showToast('ZIP export requires JSZip library', 'error');
+  return;
+}
+
+const zip = new JSZip();
+zip.file('data.json', JSON.stringify(data, null, 2));
+
+// Export Notes as .txt files
+if (data.notes && data.notes.length > 0) {
+  const notesFolder = zip.folder('notes');
+  data.notes.forEach(note => {
+    notesFolder.file(
+      `${note.id}-${sanitizeFilename(note.title || 'untitled')}.txt`,
+      note.content || ''
+    );
+  });
+}
+
+// Export Gallery Images as real image files
+if (data.gallery && data.gallery.length > 0) {
+  const imagesFolder = zip.folder('gallery');
+  data.gallery.forEach(image => {
+    if (image.dataUrl) {
+      try {
+        // Split the data URL (e.g. "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQE...")
+        const arr = image.dataUrl.split(',');
+        const mime = arr[0].match(/:(.*?);/)[1]; // Extract MIME type
+        const bstr = atob(arr[1]); // Decode Base64
+        let n = bstr.length;
+        const u8arr = new Uint8Array(n);
+        while (n--) {
+          u8arr[n] = bstr.charCodeAt(n);
+        }
+        const blob = new Blob([u8arr], { type: mime }); // Create real image blob
+
+        // Use original filename or fallback
+        const fileName = image.filename || `${image.id}.jpg`;
+        imagesFolder.file(fileName, blob);
+      } catch (err) {
+        console.warn(`Failed to export image ${image.id}:`, err);
+      }
+    }
+  });
+}
+
+// Export Arduino Projects as .ino files
+if (data.arduino && data.arduino.length > 0) {
+  const arduinoFolder = zip.folder('arduino');
+  data.arduino.forEach(project => {
+    if (project.code) {
+      arduinoFolder.file(
+        `${sanitizeFilename(project.title || 'untitled')}.ino`,
+        project.code
+      );
+    }
+  });
+}
+
+blob = await zip.generateAsync({ type: 'blob' });
+filename = `moomin-hub-backup-${new Date().toISOString().slice(0, 10)}.zip`;
+break;
             
           case 'encrypted':
             const password = prompt('Enter a password to encrypt your backup:');
@@ -3882,7 +3928,226 @@ window.loadLinkedFolderOnStartup = loadLinkedFolderOnStartup;
       initializeApp();
     }
     
+    // ----------------------
+// Local Folder Sync (subfolder-aware) - paste this BEFORE
+// the "// Add to global scope for onclick handlers" comment
+// ----------------------
+/* eslint-disable */
+window.app = window.app || {};
+
+// provide a sanitizeFilename if your app doesn't already have one
+if (typeof sanitizeFilename !== 'function') {
+  window.sanitizeFilename = function(name) {
+    return String(name)
+      .replace(/[/\\?%*:|"<>]/g, '-')   // remove illegal chars
+      .replace(/\s+/g, '_')            // spaces -> underscores
+      .replace(/_+/g, '_')             // collapse repeated underscores
+      .substring(0, 240);              // keep name length reasonable
+  };
+}
+
+async function verifyPermission(handle, withWrite = false) {
+  if (!handle) return false;
+  try {
+    const opts = withWrite ? { mode: 'readwrite' } : {};
+    if (typeof handle.queryPermission === 'function') {
+      let perm = await handle.queryPermission(opts);
+      if (perm === 'granted') return true;
+      perm = await handle.requestPermission(opts);
+      return perm === 'granted';
+    }
+    if (typeof handle.requestPermission === 'function') {
+      const perm = await handle.requestPermission(opts);
+      return perm === 'granted';
+    }
+  } catch (e) {
+    console.warn('Permission check failed', e);
+  }
+  // best-effort fallback
+  return true;
+}
+
+// writeFileToFolder(dirHandle, "notes/note-1.json", blob)
+async function writeFileToFolder(dirHandle, path, blob) {
+  if (!dirHandle) throw new Error('No directory handle provided');
+
+  // split path into folders + filename
+  const parts = path.split('/').filter(p => p && p.trim());
+  if (parts.length === 0) throw new Error('Invalid path');
+
+  let currentDir = dirHandle;
+  for (let i = 0; i < parts.length - 1; i++) {
+    // create subfolder if missing
+    currentDir = await currentDir.getDirectoryHandle(parts[i], { create: true });
+  }
+
+  const fileName = sanitizeFilename(parts[parts.length - 1]);
+  const fileHandle = await currentDir.getFileHandle(fileName, { create: true });
+  const writable = await fileHandle.createWritable();
+  await writable.write(blob);
+  await writable.close();
+}
+
+async function linkLocalFolder() {
+  try {
+    // toggle/unlink if already linked
+    if (app.localFolderHandle) {
+      if (!confirm('Unlink local folder? Files already saved will remain on disk.')) return;
+      app.localFolderHandle = null;
+      updateFolderStatusUI();
+      showToast && showToast('Local folder unlinked', 'success');
+      return;
+    }
+
+    if (typeof window.showDirectoryPicker !== 'function') {
+      showToast && showToast('This feature requires Chrome/Edge and HTTPS (or localhost).', 'error');
+      return;
+    }
+
+    const dirHandle = await window.showDirectoryPicker();
+    if (!dirHandle) return;
+
+    const ok = await verifyPermission(dirHandle, true);
+    if (!ok) {
+      showToast && showToast('Write permission is required.', 'error');
+      return;
+    }
+
+    app.localFolderHandle = dirHandle;
+    updateFolderStatusUI();
+    showToast && showToast('Local folder linked successfully', 'success');
+  } catch (err) {
+    console.error('Failed to link local folder:', err);
+    handleError && handleError('Failed to link local folder', err);
+  }
+}
+
+function loadLinkedFolderOnStartup() {
+  // Safe option: do not auto-restore handles across reloads.
+  // This keeps behavior simple — user must re-link after refresh.
+  app.localFolderHandle = null;
+  updateFolderStatusUI();
+}
+
+function updateFolderStatusUI() {
+  const el = document.getElementById('folder-status');
+  if (!el) return;
+  const btn = document.querySelector('button[onclick="linkLocalFolder()"]');
+  if (app.localFolderHandle) {
+    const name = app.localFolderHandle.name || 'Linked folder';
+    el.innerHTML = `<div class="font-medium">Status: Linked (${escapeHtml ? escapeHtml(name) : name})</div><div class="text-sm text-muted">Automatic backup enabled</div>`;
+    if (btn) btn.textContent = 'Unlink Local Folder';
+  } else {
+    el.innerHTML = `<div class="font-medium">Status: Not linked</div><div class="text-sm text-muted">Link a folder to enable automatic backup</div>`;
+    if (btn) btn.textContent = 'Link Local Folder';
+  }
+}
+function sanitizeFilename(filename) {
+  return filename.replace(/[/\\?%*:|"<>]/g, '-').replace(/\s+/g, '_');
+}
+
+// expose functions so other code can call them
+window.verifyPermission = verifyPermission;
+window.writeFileToFolder = writeFileToFolder;
+window.linkLocalFolder = linkLocalFolder;
+window.loadLinkedFolderOnStartup = loadLinkedFolderOnStartup;
+/* eslint-enable */
+
     // Add to global scope for onclick handlers
+    async function testSingleImageExport() {
+  const images = await dbGetAll('gallery');
+  if (!images.length) {
+    alert('No images found!');
+    return;
+  }
+
+  const image = images[0];
+  const arr = image.dataUrl.split(',');
+  const mime = arr[0].match(/:(.*?);/)[1];
+  const bstr = atob(arr[1]);
+  let n = bstr.length;
+  const u8arr = new Uint8Array(n);
+  while (n--) {
+    u8arr[n] = bstr.charCodeAt(n);
+  }
+  const blob = new Blob([u8arr], { type: mime });
+
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = image.filename || 'test.jpg';
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+async function importData() {
+  const fileInput = document.getElementById('import-file');
+  const file = fileInput.files[0];
+
+  if (!file) {
+    showToast('Please select a backup file to import', 'error');
+    return;
+  }
+
+  try {
+    const text = await file.text();
+    const data = JSON.parse(text);
+
+    // Validate structure
+    if (!data || !data.meta || data.meta.app !== 'MOOMIN Digital Hub') {
+      showToast('Invalid backup file format', 'error');
+      return;
+    }
+
+    showToast('Importing data...', 'info');
+
+    // Import each section if it exists
+    if (data.notes && Array.isArray(data.notes)) {
+      for (const note of data.notes) {
+        await dbAdd('notes', note);
+      }
+    }
+
+    if (data.bookmarks && Array.isArray(data.bookmarks)) {
+      for (const bookmark of data.bookmarks) {
+        await dbAdd('bookmarks', bookmark);
+      }
+    }
+
+    if (data.arduino && Array.isArray(data.arduino)) {
+      for (const project of data.arduino) {
+        await dbAdd('arduino', project);
+      }
+    }
+
+    if (data.gallery && Array.isArray(data.gallery)) {
+      for (const image of data.gallery) {
+        await dbAdd('gallery', image);
+      }
+    }
+
+    // Import safe settings
+    if (data.settings) {
+      for (const [key, value] of Object.entries(data.settings)) {
+        await setSetting(key, value);
+      }
+    }
+
+    showToast('✅ Import completed successfully!', 'success');
+
+    // Refresh current section and counts
+    await updateNavigationCounts();
+    await initializeSearch();
+    loadSection(app.currentSection); // reload current view
+
+    // Clear file input
+    fileInput.value = '';
+
+  } catch (error) {
+    console.error('Import failed:', error);
+    showToast('❌ Failed to import backup: ' + (error.message || 'Unknown error'), 'error');
+  }
+}
+
     window.openNewNoteModal = openNewNoteModal;
     window.openNewBookmarkModal = openNewBookmarkModal;
     window.openNewArduinoModal = openNewArduinoModal;
@@ -3900,8 +4165,9 @@ window.loadLinkedFolderOnStartup = loadLinkedFolderOnStartup;
     window.setTheme = setTheme;
     window.linkLocalFolder = linkLocalFolder;
     window.loadLinkedFolderOnStartup = loadLinkedFolderOnStartup;
+    window.importData = importData;
 
-    
+
   </script>
 </body>
 </html>
