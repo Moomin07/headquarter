@@ -3610,7 +3610,157 @@
       if (!confirm('Are you sure you want to delete this note? This action cannot be undone.')) {
         return;
       }
-      
+
+// ================
+// BOOKMARKS - CRUD
+// ================
+
+async function viewBookmark(id) {
+  try {
+    const bookmark = await dbGet('bookmarks', id);
+    if (!bookmark) {
+      showToast('Bookmark not found', 'error');
+      return;
+    }
+
+    const title = document.getElementById('modal-title');
+    const body = document.getElementById('modal-body');
+
+    title.textContent = bookmark.title || bookmark.url;
+    body.innerHTML = `
+      <div class="prose">
+        <p class="mb-4"><strong>URL:</strong> <a href="${escapeHtml(bookmark.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(bookmark.url)}</a></p>
+        ${bookmark.description ? `<p><strong>Description:</strong> ${escapeHtml(bookmark.description)}</p>` : ''}
+        ${bookmark.tags && bookmark.tags.length > 0 ? `
+          <div class="mt-4">
+            <strong>Tags:</strong>
+            <div class="flex flex-wrap gap-2 mt-2">
+              ${bookmark.tags.map(tag => `<span class="tag tag-purple">${escapeHtml(tag)}</span>`).join('')}
+            </div>
+          </div>
+        ` : ''}
+        <div class="text-sm text-muted mt-4">
+          <div>Created: ${formatDate(bookmark.createdAt)}</div>
+          ${bookmark.updatedAt && bookmark.updatedAt !== bookmark.createdAt ? `<div>Updated: ${formatDate(bookmark.updatedAt)}</div>` : ''}
+        </div>
+      </div>
+    `;
+
+    showModal();
+  } catch (error) {
+    handleError('Failed to load bookmark', error);
+  }
+}
+
+async function editBookmark(id) {
+  try {
+    const bookmark = await dbGet('bookmarks', id);
+    if (!bookmark) {
+      showToast('Bookmark not found', 'error');
+      return;
+    }
+
+    const title = document.getElementById('modal-title');
+    const body = document.getElementById('modal-body');
+    const footer = document.getElementById('modal-footer');
+
+    title.textContent = 'Edit Bookmark';
+    body.innerHTML = `
+      <form id="edit-bookmark-form">
+        <div class="input-group">
+          <label for="edit-bookmark-url" class="input-label required">URL</label>
+          <input type="url" id="edit-bookmark-url" class="input" value="${escapeHtml(bookmark.url)}" required>
+        </div>
+        <div class="input-group">
+          <label for="edit-bookmark-title" class="input-label">Title</label>
+          <input type="text" id="edit-bookmark-title" class="input" value="${escapeHtml(bookmark.title || '')}" placeholder="Enter bookmark title">
+        </div>
+        <div class="input-group">
+          <label for="edit-bookmark-description" class="input-label">Description</label>
+          <textarea id="edit-bookmark-description" class="input textarea" placeholder="Brief description...">${escapeHtml(bookmark.description || '')}</textarea>
+        </div>
+        <div class="input-group">
+          <label for="edit-bookmark-tags" class="input-label">Tags</label>
+          <input type="text" id="edit-bookmark-tags" class="input" value="${bookmark.tags ? bookmark.tags.join(', ') : ''}" placeholder="Enter tags separated by commas">
+        </div>
+      </form>
+    `;
+
+    footer.style.display = 'flex';
+    footer.innerHTML = `
+      <button class="btn btn-ghost" onclick="hideModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="updateBookmark(${id})">Update Bookmark</button>
+    `;
+
+    showModal();
+    document.getElementById('edit-bookmark-url').focus();
+  } catch (error) {
+    handleError('Failed to load bookmark for editing', error);
+  }
+}
+
+async function updateBookmark(id) {
+  const url = document.getElementById('edit-bookmark-url').value.trim();
+  const title = document.getElementById('edit-bookmark-title').value.trim();
+  const description = document.getElementById('edit-bookmark-description').value.trim();
+  const tags = document.getElementById('edit-bookmark-tags').value.trim();
+
+  if (!url) {
+    showToast('Please enter a URL', 'error');
+    return;
+  }
+
+  try {
+    new URL(url); // validate
+  } catch {
+    showToast('Please enter a valid URL', 'error');
+    return;
+  }
+
+  try {
+    const bookmark = await dbGet('bookmarks', id);
+    const updatedBookmark = {
+      ...bookmark,
+      url,
+      title: title || getDomain(url),
+      description,
+      tags: tags ? tags.split(',').map(tag => tag.trim()).filter(tag => tag) : [],
+      domain: getDomain(url)
+    };
+
+    await dbUpdate('bookmarks', updatedBookmark);
+    hideModal();
+    showToast('Bookmark updated successfully!', 'success');
+
+    if (app.currentSection === 'bookmarks') {
+      loadSection('bookmarks');
+    }
+  } catch (error) {
+    handleError('Failed to update bookmark', error);
+  }
+}
+
+async function deleteBookmark(id) {
+  if (!confirm('Are you sure you want to delete this bookmark? This cannot be undone.')) {
+    return;
+  }
+
+  try {
+    await dbDelete('bookmarks', id);
+    showToast('Bookmark deleted!', 'success', {
+      text: 'Undo',
+      callback: () => showToast('Undo not implemented yet', 'info')
+    });
+
+    if (app.currentSection === 'bookmarks') {
+      loadSection('bookmarks');
+    }
+  } catch (error) {
+    handleError('Failed to delete bookmark', error);
+  }
+}
+  
+
       try {
         await dbDelete('notes', id);
         showToast('Note deleted successfully', 'success', {
@@ -4137,7 +4287,15 @@ async function importData() {
     // Refresh current section and counts
     await updateNavigationCounts();
     await initializeSearch();
-    loadSection(app.currentSection); // reload current view
+
+    // Force reload gallery if we're in it, since images need to render
+if (app.currentSection === 'gallery') {
+  loadSection('dashboard'); // switch away
+  setTimeout(() => loadSection('gallery'), 300); // then back
+} else {
+  loadSection(app.currentSection);
+}
+
 
     // Clear file input
     fileInput.value = '';
@@ -4166,6 +4324,456 @@ async function importData() {
     window.linkLocalFolder = linkLocalFolder;
     window.loadLinkedFolderOnStartup = loadLinkedFolderOnStartup;
     window.importData = importData;
+
+// ========================
+// 🛠️ BOOKMARKS - FULL CRUD
+// ========================
+
+async function viewBookmark(id) {
+  try {
+    const bookmark = await dbGet('bookmarks', id);
+    if (!bookmark) {
+      showToast('Bookmark not found', 'error');
+      return;
+    }
+
+    const title = document.getElementById('modal-title');
+    const body = document.getElementById('modal-body');
+
+    title.textContent = bookmark.title || bookmark.url;
+    body.innerHTML = `
+      <div class="prose">
+        <p class="mb-4"><strong>URL:</strong> <a href="${escapeHtml(bookmark.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(bookmark.url)}</a></p>
+        ${bookmark.description ? `<p><strong>Description:</strong> ${escapeHtml(bookmark.description)}</p>` : ''}
+        ${bookmark.tags && bookmark.tags.length > 0 ? `
+          <div class="mt-4">
+            <strong>Tags:</strong>
+            <div class="flex flex-wrap gap-2 mt-2">
+              ${bookmark.tags.map(tag => `<span class="tag tag-purple">${escapeHtml(tag)}</span>`).join('')}
+            </div>
+          </div>
+        ` : ''}
+        <div class="text-sm text-muted mt-4">
+          <div>Created: ${formatDate(bookmark.createdAt)}</div>
+          ${bookmark.updatedAt && bookmark.updatedAt !== bookmark.createdAt ? `<div>Updated: ${formatDate(bookmark.updatedAt)}</div>` : ''}
+        </div>
+      </div>
+    `;
+
+    showModal();
+  } catch (error) {
+    handleError('Failed to load bookmark', error);
+  }
+}
+
+async function editBookmark(id) {
+  try {
+    const bookmark = await dbGet('bookmarks', id);
+    if (!bookmark) {
+      showToast('Bookmark not found', 'error');
+      return;
+    }
+
+    const title = document.getElementById('modal-title');
+    const body = document.getElementById('modal-body');
+    const footer = document.getElementById('modal-footer');
+
+    title.textContent = 'Edit Bookmark';
+    body.innerHTML = `
+      <form id="edit-bookmark-form">
+        <div class="input-group">
+          <label for="edit-bookmark-url" class="input-label required">URL</label>
+          <input type="url" id="edit-bookmark-url" class="input" value="${escapeHtml(bookmark.url)}" required>
+        </div>
+        <div class="input-group">
+          <label for="edit-bookmark-title" class="input-label">Title</label>
+          <input type="text" id="edit-bookmark-title" class="input" value="${escapeHtml(bookmark.title || '')}" placeholder="Enter bookmark title">
+        </div>
+        <div class="input-group">
+          <label for="edit-bookmark-description" class="input-label">Description</label>
+          <textarea id="edit-bookmark-description" class="input textarea" placeholder="Brief description...">${escapeHtml(bookmark.description || '')}</textarea>
+        </div>
+        <div class="input-group">
+          <label for="edit-bookmark-tags" class="input-label">Tags</label>
+          <input type="text" id="edit-bookmark-tags" class="input" value="${bookmark.tags ? bookmark.tags.join(', ') : ''}" placeholder="Enter tags separated by commas">
+        </div>
+      </form>
+    `;
+
+    footer.style.display = 'flex';
+    footer.innerHTML = `
+      <button class="btn btn-ghost" onclick="hideModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="updateBookmark(${id})">Update Bookmark</button>
+    `;
+
+    showModal();
+    document.getElementById('edit-bookmark-url').focus();
+  } catch (error) {
+    handleError('Failed to load bookmark for editing', error);
+  }
+}
+
+async function updateBookmark(id) {
+  const url = document.getElementById('edit-bookmark-url').value.trim();
+  const title = document.getElementById('edit-bookmark-title').value.trim();
+  const description = document.getElementById('edit-bookmark-description').value.trim();
+  const tags = document.getElementById('edit-bookmark-tags').value.trim();
+
+  if (!url) {
+    showToast('Please enter a URL', 'error');
+    return;
+  }
+
+  try {
+    new URL(url); // validate
+  } catch {
+    showToast('Please enter a valid URL', 'error');
+    return;
+  }
+
+  try {
+    const bookmark = await dbGet('bookmarks', id);
+    const updatedBookmark = {
+      ...bookmark,
+      url,
+      title: title || getDomain(url),
+      description,
+      tags: tags ? tags.split(',').map(tag => tag.trim()).filter(tag => tag) : [],
+      domain: getDomain(url)
+    };
+
+    await dbUpdate('bookmarks', updatedBookmark);
+    hideModal();
+    showToast('Bookmark updated successfully!', 'success');
+
+    if (app.currentSection === 'bookmarks') {
+      loadSection('bookmarks');
+    }
+  } catch (error) {
+    handleError('Failed to update bookmark', error);
+  }
+}
+
+async function deleteBookmark(id) {
+  if (!confirm('Are you sure you want to delete this bookmark? This cannot be undone.')) {
+    return;
+  }
+
+  try {
+    await dbDelete('bookmarks', id);
+    showToast('Bookmark deleted!', 'success', {
+      text: 'Undo',
+      callback: () => showToast('Undo not implemented yet', 'info')
+    });
+
+    if (app.currentSection === 'bookmarks') {
+      loadSection('bookmarks');
+    }
+  } catch (error) {
+    handleError('Failed to delete bookmark', error);
+  }
+}
+
+// ========================
+// 🔧 ARDUINO - FULL CRUD
+// ========================
+
+async function viewArduinoProject(id) {
+  try {
+    const project = await dbGet('arduino', id);
+    if (!project) {
+      showToast('Project not found', 'error');
+      return;
+    }
+
+    const title = document.getElementById('modal-title');
+    const body = document.getElementById('modal-body');
+
+    title.textContent = project.title;
+    body.innerHTML = `
+      <div class="prose">
+        ${project.description ? `<p><strong>Description:</strong> ${escapeHtml(project.description)}</p>` : ''}
+        ${project.status ? `<p><strong>Status:</strong> <span class="tag tag-${getStatusColor(project.status)}">${escapeHtml(project.status)}</span></p>` : ''}
+        ${project.code ? `
+          <div class="mt-4">
+            <strong>Code:</strong>
+            <pre style="background: var(--bg-tertiary); padding: var(--space-3); border-radius: var(--radius-md); overflow-x: auto; margin-top: var(--space-2);">${escapeHtml(project.code)}</pre>
+          </div>
+        ` : ''}
+        ${project.tags && project.tags.length > 0 ? `
+          <div class="mt-4">
+            <strong>Tags:</strong>
+            <div class="flex flex-wrap gap-2 mt-2">
+              ${project.tags.map(tag => `<span class="tag tag-green">${escapeHtml(tag)}</span>`).join('')}
+            </div>
+          </div>
+        ` : ''}
+        <div class="text-sm text-muted mt-4">
+          <div>Created: ${formatDate(project.createdAt)}</div>
+          ${project.updatedAt && project.updatedAt !== project.createdAt ? `<div>Updated: ${formatDate(project.updatedAt)}</div>` : ''}
+          ${project.codeLines ? `<div>Lines of Code: ${project.codeLines}</div>` : ''}
+        </div>
+      </div>
+    `;
+
+    showModal();
+  } catch (error) {
+    handleError('Failed to load project', error);
+  }
+}
+
+async function editArduinoProject(id) {
+  try {
+    const project = await dbGet('arduino', id);
+    if (!project) {
+      showToast('Project not found', 'error');
+      return;
+    }
+
+    const title = document.getElementById('modal-title');
+    const body = document.getElementById('modal-body');
+    const footer = document.getElementById('modal-footer');
+
+    title.textContent = 'Edit Arduino Project';
+    body.innerHTML = `
+      <form id="edit-arduino-form">
+        <div class="input-group">
+          <label for="edit-arduino-title" class="input-label required">Project Title</label>
+          <input type="text" id="edit-arduino-title" class="input" value="${escapeHtml(project.title)}" required>
+        </div>
+        <div class="input-group">
+          <label for="edit-arduino-description" class="input-label">Description</label>
+          <textarea id="edit-arduino-description" class="input textarea" placeholder="Describe your project...">${escapeHtml(project.description || '')}</textarea>
+        </div>
+        <div class="input-group">
+          <label for="edit-arduino-code" class="input-label">Arduino Code</label>
+          <textarea id="edit-arduino-code" class="input textarea" rows="8" style="font-family: monospace;">${escapeHtml(project.code || '')}</textarea>
+        </div>
+        <div class="input-group">
+          <label for="edit-arduino-status" class="input-label">Status</label>
+          <select id="edit-arduino-status" class="input">
+            <option value="planning"${project.status === 'planning' ? ' selected' : ''}>Planning</option>
+            <option value="in-progress"${project.status === 'in-progress' ? ' selected' : ''}>In Progress</option>
+            <option value="testing"${project.status === 'testing' ? ' selected' : ''}>Testing</option>
+            <option value="completed"${project.status === 'completed' ? ' selected' : ''}>Completed</option>
+            <option value="on-hold"${project.status === 'on-hold' ? ' selected' : ''}>On Hold</option>
+          </select>
+        </div>
+        <div class="input-group">
+          <label for="edit-arduino-tags" class="input-label">Tags</label>
+          <input type="text" id="edit-arduino-tags" class="input" value="${project.tags ? project.tags.join(', ') : ''}" placeholder="sensor, led, etc.">
+        </div>
+      </form>
+    `;
+
+    footer.style.display = 'flex';
+    footer.innerHTML = `
+      <button class="btn btn-ghost" onclick="hideModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="updateArduinoProject(${id})">Update Project</button>
+    `;
+
+    showModal();
+    document.getElementById('edit-arduino-title').focus();
+  } catch (error) {
+    handleError('Failed to load project for editing', error);
+  }
+}
+
+async function updateArduinoProject(id) {
+  const title = document.getElementById('edit-arduino-title').value.trim();
+  const description = document.getElementById('edit-arduino-description').value.trim();
+  const code = document.getElementById('edit-arduino-code').value.trim();
+  const status = document.getElementById('edit-arduino-status').value;
+  const tags = document.getElementById('edit-arduino-tags').value.trim();
+
+  if (!title) {
+    showToast('Please enter a project title', 'error');
+    return;
+  }
+
+  try {
+    const project = await dbGet('arduino', id);
+    const updatedProject = {
+      ...project,
+      title,
+      description,
+      code,
+      status,
+      tags: tags ? tags.split(',').map(tag => tag.trim()).filter(tag => tag) : [],
+      codeLines: code ? code.split('\n').length : 0
+    };
+
+    await dbUpdate('arduino', updatedProject);
+    hideModal();
+    showToast('Project updated successfully!', 'success');
+
+    if (app.currentSection === 'arduino') {
+      loadSection('arduino');
+    }
+  } catch (error) {
+    handleError('Failed to update project', error);
+  }
+}
+
+async function deleteArduinoProject(id) {
+  if (!confirm('Are you sure you want to delete this project? This cannot be undone.')) {
+    return;
+  }
+
+  try {
+    await dbDelete('arduino', id);
+    showToast('Project deleted!', 'success', {
+      text: 'Undo',
+      callback: () => showToast('Undo not implemented yet', 'info')
+    });
+
+    if (app.currentSection === 'arduino') {
+      loadSection('arduino');
+    }
+  } catch (error) {
+    handleError('Failed to delete project', error);
+  }
+}
+
+// ========================
+// 🖼️ GALLERY - FULL CRUD
+// ========================
+
+function openLightbox(id) {
+  dbGet('gallery', id).then(image => {
+    if (!image) {
+      showToast('Image not found', 'error');
+      return;
+    }
+
+    const modal = document.getElementById('modal-backdrop');
+    const title = document.getElementById('modal-title');
+    const body = document.getElementById('modal-body');
+    const footer = document.getElementById('modal-footer');
+
+    title.textContent = image.title || image.filename;
+    body.innerHTML = `
+      <div style="text-align: center;">
+        <img src="${image.dataUrl}" alt="${escapeHtml(image.title || image.filename)}"
+             style="max-width: 100%; max-height: 70vh; border-radius: var(--radius-lg);">
+        ${image.description ? `<p class="mt-4">${escapeHtml(image.description)}</p>` : ''}
+        <div class="text-sm text-muted mt-4">
+          ${formatDate(image.createdAt)}
+          ${image.fileSize ? ` • ${(image.fileSize / 1024).toFixed(1)} KB` : ''}
+        </div>
+      </div>
+    `;
+
+    footer.style.display = 'flex';
+    footer.innerHTML = `
+      <button class="btn btn-ghost" onclick="hideModal()">Close</button>
+    `;
+
+    showModal();
+  }).catch(err => handleError('Failed to load image', err));
+}
+
+async function editImage(id) {
+  try {
+    const image = await dbGet('gallery', id);
+    if (!image) {
+      showToast('Image not found', 'error');
+      return;
+    }
+
+    const title = document.getElementById('modal-title');
+    const body = document.getElementById('modal-body');
+    const footer = document.getElementById('modal-footer');
+
+    title.textContent = 'Edit Image';
+    body.innerHTML = `
+      <form id="edit-image-form">
+        <div class="input-group">
+          <label for="edit-image-title" class="input-label">Title</label>
+          <input type="text" id="edit-image-title" class="input" value="${escapeHtml(image.title || image.filename.replace(/\.[^/.]+$/, ''))}">
+        </div>
+        <div class="input-group">
+          <label for="edit-image-description" class="input-label">Description</label>
+          <textarea id="edit-image-description" class="input textarea" rows="3">${escapeHtml(image.description || '')}</textarea>
+        </div>
+      </form>
+    `;
+
+    footer.style.display = 'flex';
+    footer.innerHTML = `
+      <button class="btn btn-ghost" onclick="hideModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="updateImage(${id})">Update Image</button>
+    `;
+
+    showModal();
+    document.getElementById('edit-image-title').focus();
+  } catch (error) {
+    handleError('Failed to load image for editing', error);
+  }
+}
+
+async function updateImage(id) {
+  const title = document.getElementById('edit-image-title').value.trim();
+  const description = document.getElementById('edit-image-description').value.trim();
+
+  try {
+    const image = await dbGet('gallery', id);
+    const updatedImage = {
+      ...image,
+      title: title || image.filename.replace(/\.[^/.]+$/, ''),
+      description
+    };
+
+    await dbUpdate('gallery', updatedImage);
+    hideModal();
+    showToast('Image updated!', 'success');
+
+    if (app.currentSection === 'gallery') {
+      loadSection('gallery');
+    }
+  } catch (error) {
+    handleError('Failed to update image', error);
+  }
+}
+
+async function deleteImage(id) {
+  if (!confirm('Are you sure you want to delete this image? This cannot be undone.')) {
+    return;
+  }
+
+  try {
+    await dbDelete('gallery', id);
+    showToast('Image deleted!', 'success', {
+      text: 'Undo',
+      callback: () => showToast('Undo not implemented yet', 'info')
+    });
+
+    if (app.currentSection === 'gallery') {
+      loadSection('gallery');
+    }
+  } catch (error) {
+    handleError('Failed to delete image', error);
+  }
+}
+
+// =============================
+// 🌐 EXPOSE ALL FUNCTIONS TO WINDOW
+// =============================
+
+window.viewBookmark = viewBookmark;
+window.editBookmark = editBookmark;
+window.updateBookmark = updateBookmark;
+window.deleteBookmark = deleteBookmark;
+
+window.viewArduinoProject = viewArduinoProject;
+window.editArduinoProject = editArduinoProject;
+window.updateArduinoProject = updateArduinoProject;
+window.deleteArduinoProject = deleteArduinoProject;
+
+window.openLightbox = openLightbox;
+window.editImage = editImage;
+window.updateImage = updateImage;
+window.deleteImage = deleteImage;
 
 
   </script>
