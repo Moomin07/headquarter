@@ -1373,7 +1373,7 @@
       <div class="sidebar-header">
         <div class="logo">
           <div class="logo-image">M</div>
-          <span class="logo-text">MOOMIN Hub</span>
+          <span class="logo-text">MOOMIN'S Hub</span>
         </div>
       </div>
       
@@ -1601,6 +1601,9 @@
         await initializeDatabase();
         await loadUserSettings();
         await checkAuthentication();
+        if (isAndroid()) {
+  document.body.classList.add('android');
+         }
         setupEventListeners();
         setupServiceWorker();
         updateClock();
@@ -1709,6 +1712,10 @@
     };
     request.onerror = () => reject(request.error);
   });
+}
+
+function isAndroid() {
+  return /Android/i.test(navigator.userAgent);
 }
 
 function dbUpdate(storeName, item) {
@@ -4052,6 +4059,7 @@ async function linkLocalFolder() {
     app.localFolderHandle = dirHandle;
     updateFolderStatusUI();
     showToast('Local folder linked successfully', 'success');
+    await autoLoadAllItemsFromFolder();
   } catch (err) {
     handleError('Failed to link local folder', err);
   }
@@ -4085,20 +4093,86 @@ async function loadLinkedFolderOnStartup() {
 async function autoLoadAllItemsFromFolder() {
   if (!app.localFolderHandle) return;
 
-  const stores = ['notes', 'bookmarks', 'arduino'];
+  try {
+    const entries = [];
+    for await (const entry of app.localFolderHandle.values()) {
+      entries.push(entry);
+    }
 
-  for (const storeName of stores) {
-    try {
-      const folderHandle = await app.localFolderHandle.getDirectoryHandle(storeName, { create: false });
-      for await (const entry of folderHandle.values()) {
-        if (entry.kind === 'file' && entry.name.endsWith('.json')) {
-          const fileHandle = await folderHandle.getFileHandle(entry.name);
+    // Load based on device type
+    if (isAndroid()) {
+      // ANDROID: Look for files like note-123.json, bookmark-456.json, image-789.jpg, image-789.meta.json
+      const metaMap = {};
+
+      // First, load all .meta.json files
+      for (const entry of entries) {
+        if (entry.kind === 'file' && entry.name.endsWith('.meta.json')) {
+          const fileHandle = await app.localFolderHandle.getFileHandle(entry.name);
+          const file = await fileHandle.getFile();
+          const text = await file.text();
+          const meta = JSON.parse(text);
+          const idMatch = entry.name.match(/-(\d+)\.meta\.json$/);
+          if (idMatch) {
+            meta.id = parseInt(idMatch[1], 10);
+            metaMap[meta.id] = meta;
+          }
+        }
+      }
+
+      // Load images + pair with metadata
+      for (const entry of entries) {
+        if (entry.kind === 'file' && !entry.name.endsWith('.meta.json') && entry.name.startsWith('image-')) {
+          const idMatch = entry.name.match(/^image-(\d+)(?:\..+)?$/);
+          if (idMatch) {
+            const id = parseInt(idMatch[1], 10);
+            const meta = metaMap[id];
+            if (meta) {
+              const fileHandle = await app.localFolderHandle.getFileHandle(entry.name);
+              const file = await fileHandle.getFile();
+              const arrayBuffer = await file.arrayBuffer();
+              const bytes = new Uint8Array(arrayBuffer);
+              let binary = '';
+              for (let i = 0; i < bytes.byteLength; i++) {
+                binary += String.fromCharCode(bytes[i]);
+              }
+              const dataUrl = `data:${file.type};base64,${btoa(binary)}`;
+
+              const imageItem = {
+                ...meta,
+                dataUrl,
+                filename: entry.name,
+                mimeType: file.type,
+                fileSize: file.size
+              };
+
+              await dbAdd('gallery', imageItem).catch(async (err) => {
+                console.warn(`Add failed, trying update for gallery ${imageItem.id}:`, err);
+                await dbUpdate('gallery', imageItem);
+              });
+            }
+          }
+        }
+      }
+
+      // Load notes, bookmarks, arduino from flat files
+      for (const entry of entries) {
+        if (entry.kind === 'file' && entry.name.endsWith('.json') && !entry.name.endsWith('.meta.json')) {
+          const name = entry.name;
+          let storeName = null;
+
+          if (name.startsWith('note-')) storeName = 'notes';
+          else if (name.startsWith('bookmark-')) storeName = 'bookmarks';
+          else if (name.startsWith('arduino-')) storeName = 'arduino';
+          else continue;
+
+          const fileHandle = await app.localFolderHandle.getFileHandle(entry.name);
           const file = await fileHandle.getFile();
           const text = await file.text();
           const item = JSON.parse(text);
 
-          // Upsert into DB
-          if (item.id) {
+          const idMatch = name.match(/-(\d+)\.json$/);
+          if (idMatch) {
+            item.id = parseInt(idMatch[1], 10);
             await dbAdd(storeName, item).catch(async (err) => {
               console.warn(`Add failed, trying update for ${storeName} ${item.id}:`, err);
               await dbUpdate(storeName, item);
@@ -4106,70 +4180,97 @@ async function autoLoadAllItemsFromFolder() {
           }
         }
       }
-    } catch (err) {
-      // Folder doesn't exist — skip
-      continue;
-    }
-  }
 
-  // Load gallery separately (images + metadata)
-  try {
-    const galleryFolder = await app.localFolderHandle.getDirectoryHandle('gallery', { create: false });
-    const metaMap = {};
+    } else {
+      // DESKTOP: Load from subfolders
+      const stores = ['notes', 'bookmarks', 'arduino'];
 
-    // First, load all .meta.json files
-    for await (const entry of galleryFolder.values()) {
-      if (entry.kind === 'file' && entry.name.endsWith('.meta.json')) {
-        const fileHandle = await galleryFolder.getFileHandle(entry.name);
-        const file = await fileHandle.getFile();
-        const text = await file.text();
-        const meta = JSON.parse(text);
-        metaMap[meta.id] = meta;
-      }
-    }
+      for (const storeName of stores) {
+        try {
+          const folderHandle = await app.localFolderHandle.getDirectoryHandle(storeName, { create: false });
+          for await (const entry of folderHandle.values()) {
+            if (entry.kind === 'file' && entry.name.endsWith('.json')) {
+              const fileHandle = await folderHandle.getFileHandle(entry.name);
+              const file = await fileHandle.getFile();
+              const text = await file.text();
+              const item = JSON.parse(text);
 
-    // Then, for each image file, if we have metadata, restore it
-    for await (const entry of galleryFolder.values()) {
-      if (entry.kind === 'file' && !entry.name.endsWith('.meta.json')) {
-        const fileId = entry.name.replace(/\.[^/.]+$/, ''); // remove extension
-        const meta = metaMap[fileId];
-
-        if (meta) {
-          // Read image as dataUrl
-          const fileHandle = await galleryFolder.getFileHandle(entry.name);
-          const file = await fileHandle.getFile();
-          const arrayBuffer = await file.arrayBuffer();
-          const bytes = new Uint8Array(arrayBuffer);
-          let binary = '';
-          for (let i = 0; i < bytes.byteLength; i++) {
-            binary += String.fromCharCode(bytes[i]);
+              if (item.id) {
+                await dbAdd(storeName, item).catch(async (err) => {
+                  console.warn(`Add failed, trying update for ${storeName} ${item.id}:`, err);
+                  await dbUpdate(storeName, item);
+                });
+              }
+            }
           }
-          const dataUrl = `data:${file.type};base64,${btoa(binary)}`;
-
-          const imageItem = {
-            ...meta,
-            dataUrl,
-            filename: entry.name,
-            mimeType: file.type,
-            fileSize: file.size
-          };
-
-          await dbAdd('gallery', imageItem).catch(async (err) => {
-            console.warn(`Add failed, trying update for gallery ${imageItem.id}:`, err);
-            await dbUpdate('gallery', imageItem);
-          });
+        } catch (err) {
+          continue; // folder doesn't exist
         }
       }
-    }
-  } catch (err) {
-    // Gallery folder doesn't exist — skip
-  }
 
-  // Refresh UI
-  await updateNavigationCounts();
-  await initializeSearch();
-  if (app.currentSection) {
-    loadSection(app.currentSection);
+      // Load gallery
+      try {
+        const galleryFolder = await app.localFolderHandle.getDirectoryHandle('gallery', { create: false });
+        const metaMap = {};
+
+        for await (const entry of galleryFolder.values()) {
+          if (entry.kind === 'file' && entry.name.endsWith('.meta.json')) {
+            const fileHandle = await galleryFolder.getFileHandle(entry.name);
+            const file = await fileHandle.getFile();
+            const text = await file.text();
+            const meta = JSON.parse(text);
+            metaMap[meta.id] = meta;
+          }
+        }
+
+        for await (const entry of galleryFolder.values()) {
+          if (entry.kind === 'file' && !entry.name.endsWith('.meta.json')) {
+            const fileId = entry.name.replace(/\.[^/.]+$/, '');
+            const meta = metaMap[fileId];
+
+            if (meta) {
+              const fileHandle = await galleryFolder.getFileHandle(entry.name);
+              const file = await fileHandle.getFile();
+              const arrayBuffer = await file.arrayBuffer();
+              const bytes = new Uint8Array(arrayBuffer);
+              let binary = '';
+              for (let i = 0; i < bytes.byteLength; i++) {
+                binary += String.fromCharCode(bytes[i]);
+              }
+              const dataUrl = `data:${file.type};base64,${btoa(binary)}`;
+
+              const imageItem = {
+                ...meta,
+                dataUrl,
+                filename: entry.name,
+                mimeType: file.type,
+                fileSize: file.size
+              };
+
+              await dbAdd('gallery', imageItem).catch(async (err) => {
+                console.warn(`Add failed, trying update for gallery ${imageItem.id}:`, err);
+                await dbUpdate('gallery', imageItem);
+              });
+            }
+          }
+        }
+      } catch (err) {
+        // gallery folder doesn't exist
+      }
+    }
+
+    // Refresh UI
+    await updateNavigationCounts();
+    await initializeSearch();
+    if (app.currentSection) {
+      loadSection(app.currentSection);
+    }
+
+    showToast('✅ Loaded all items from folder', 'success');
+
+  } catch (err) {
+    console.error('Failed to auto-load from folder:', err);
+    showToast('⚠️ Failed to load some items', 'error');
   }
 }
 
@@ -4180,10 +4281,20 @@ function updateFolderStatusUI() {
   const btn = document.querySelector('button[onclick="linkLocalFolder()"]');
   if (app.localFolderHandle) {
     const name = app.localFolderHandle.name || 'Linked folder';
-    el.innerHTML = `<div class="font-medium">Status: Linked (${escapeHtml(name)})</div><div class="text-sm text-muted">Automatic backup enabled</div>`;
+    let androidBadge = '';
+    if (isAndroid()) {
+androidBadge = ' <span style="color: var(--amber-500); font-weight: var(--font-weight-medium);">📱 (Android Mode)</span>';
+    }
+    el.innerHTML = `
+      <div class="font-medium">Status: Linked (${escapeHtml(name)})${androidBadge}</div>
+      <div class="text-sm text-muted">Automatic backup enabled</div>
+    `;
     if (btn) btn.textContent = 'Unlink Local Folder';
   } else {
-    el.innerHTML = `<div class="font-medium">Status: Not linked</div><div class="text-sm text-muted">Link a folder to enable automatic backup</div>`;
+    el.innerHTML = `
+      <div class="font-medium">Status: Not linked</div>
+      <div class="text-sm text-muted">Link a folder to enable automatic backup</div>
+    `;
     if (btn) btn.textContent = 'Link Local Folder';
   }
 }
@@ -4263,14 +4374,56 @@ async function writeFileToFolder(dirHandle, path, blob) {
 async function autoSaveItemToFile(storeName, item) {
   if (!app.localFolderHandle) return;
 
-  // Define folder path based on store
-  let folderPath = storeName; // e.g., "notes", "bookmarks"
-  let fileName = `${item.id}.json`;
+  let folderPath = '';
+  let fileName = '';
   let content = JSON.stringify(item, null, 2);
 
-  // Special handling for gallery images
+  // ANDROID WORKAROUND: Avoid subfolders — use filename prefixes instead
+  if (isAndroid()) {
+    const prefix = storeName === 'bookmarks' ? 'bookmark' :
+                   storeName === 'arduino' ? 'arduino' :
+                   storeName === 'gallery' ? 'image' : storeName;
+
+    if (storeName === 'gallery' && item.dataUrl) {
+      // Handle image
+      const arr = item.dataUrl.split(',');
+      const mime = arr[0].match(/:(.*?);/)[1];
+      const bstr = atob(arr[1]);
+      const u8arr = new Uint8Array(bstr.length);
+      for (let i = 0; i < bstr.length; i++) {
+        u8arr[i] = bstr.charCodeAt(i);
+      }
+      const blob = new Blob([u8arr], { type: mime });
+
+      fileName = `${prefix}-${item.id}.${mime.split('/')[1] || 'jpg'}`;
+      await writeFileToFolder(app.localFolderHandle, fileName, blob);
+
+      // Save metadata beside it
+      const meta = { ...item };
+      delete meta.dataUrl;
+      await writeFileToFolder(
+        app.localFolderHandle,
+        `${prefix}-${item.id}.meta.json`,
+        new Blob([JSON.stringify(meta, null, 2)], { type: 'application/json' })
+      );
+      return;
+    }
+
+    // For notes/bookmarks/arduino — save as .json in root
+    fileName = `${prefix}-${item.id}.json`;
+    await writeFileToFolder(
+      app.localFolderHandle,
+      fileName,
+      new Blob([content], { type: 'application/json' })
+    );
+    return;
+  }
+
+  // DESKTOP: Use subfolders (original behavior)
+  folderPath = storeName;
+  fileName = `${item.id}.json`;
+
   if (storeName === 'gallery' && item.dataUrl) {
-    // Save image as actual binary file
     const arr = item.dataUrl.split(',');
     const mime = arr[0].match(/:(.*?);/)[1];
     const bstr = atob(arr[1]);
@@ -4280,16 +4433,13 @@ async function autoSaveItemToFile(storeName, item) {
     }
     const blob = new Blob([u8arr], { type: mime });
 
-    // Use original filename or fallback
     fileName = item.filename || `${item.id}.${mime.split('/')[1] || 'jpg'}`;
-    folderPath = 'gallery'; // images go in /gallery/
+    folderPath = 'gallery';
 
-    // Write binary blob
     await writeFileToFolder(app.localFolderHandle, `${folderPath}/${fileName}`, blob);
 
-    // Also save metadata as .json beside it
     const meta = { ...item };
-    delete meta.dataUrl; // don't store dataUrl in metadata file
+    delete meta.dataUrl;
     await writeFileToFolder(
       app.localFolderHandle,
       `${folderPath}/${item.id}.meta.json`,
@@ -4298,97 +4448,11 @@ async function autoSaveItemToFile(storeName, item) {
     return;
   }
 
-  // For notes, bookmarks, arduino — save as .json
   await writeFileToFolder(
     app.localFolderHandle,
     `${folderPath}/${fileName}`,
     new Blob([content], { type: 'application/json' })
   );
-}
-
-async function linkLocalFolder() {
-  try {
-    // toggle/unlink if already linked
-    if (app.localFolderHandle) {
-      if (!confirm('Unlink local folder? Files already saved will remain on disk.')) return;
-      app.localFolderHandle = null;
-      updateFolderStatusUI();
-      showToast && showToast('Local folder unlinked', 'success');
-      return;
-    }
-
-    if (typeof window.showDirectoryPicker !== 'function') {
-      showToast && showToast('This feature requires Chrome/Edge and HTTPS (or localhost).', 'error');
-      return;
-    }
-
-    const dirHandle = await window.showDirectoryPicker();
-    if (!dirHandle) return;
-
-    const ok = await verifyPermission(dirHandle, true);
-    if (!ok) {
-      showToast && showToast('Write permission is required.', 'error');
-      return;
-    }
-
-    app.localFolderHandle = dirHandle;
-    updateFolderStatusUI();
-    showToast && showToast('Local folder linked successfully', 'success');
-    await autoLoadAllItemsFromFolder();
-  } catch (err) {
-    console.error('Failed to link local folder:', err);
-    handleError && handleError('Failed to link local folder', err);
-  }
-}
-
-function updateFolderStatusUI() {
-  const el = document.getElementById('folder-status');
-  if (!el) return;
-  const btn = document.querySelector('button[onclick="linkLocalFolder()"]');
-  if (app.localFolderHandle) {
-    const name = app.localFolderHandle.name || 'Linked folder';
-    el.innerHTML = `<div class="font-medium">Status: Linked (${escapeHtml ? escapeHtml(name) : name})</div><div class="text-sm text-muted">Automatic backup enabled</div>`;
-    if (btn) btn.textContent = 'Unlink Local Folder';
-  } else {
-    el.innerHTML = `<div class="font-medium">Status: Not linked</div><div class="text-sm text-muted">Link a folder to enable automatic backup</div>`;
-    if (btn) btn.textContent = 'Link Local Folder';
-  }
-}
-function sanitizeFilename(filename) {
-  return filename.replace(/[/\\?%*:|"<>]/g, '-').replace(/\s+/g, '_');
-}
-
-// expose functions so other code can call them
-window.verifyPermission = verifyPermission;
-window.writeFileToFolder = writeFileToFolder;
-window.linkLocalFolder = linkLocalFolder;
-window.loadLinkedFolderOnStartup = loadLinkedFolderOnStartup;
-/* eslint-enable */
-
-    // Add to global scope for onclick handlers
-    async function testSingleImageExport() {
-  const images = await dbGetAll('gallery');
-  if (!images.length) {
-    alert('No images found!');
-    return;
-  }
-
-  const image = images[0];
-  const arr = image.dataUrl.split(',');
-  const mime = arr[0].match(/:(.*?);/)[1];
-  const bstr = atob(arr[1]);
-  let n = bstr.length;
-  const u8arr = new Uint8Array(n);
-  while (n--) {
-    u8arr[n] = bstr.charCodeAt(n);
-  }
-  const blob = new Blob([u8arr], { type: mime });
-
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = image.filename || 'test.jpg';
-  a.click();
-  URL.revokeObjectURL(a.href);
 }
 
 async function importData() {
