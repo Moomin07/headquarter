@@ -816,6 +816,30 @@
       justify-content: flex-end;
       gap: var(--space-3);
     }
+
+    /* ======================
+   LIGHTBOX MODAL
+   ====================== */
+
+#lightbox-modal {
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.25s ease, visibility 0.25s ease;
+}
+
+#lightbox-modal:not(.hidden) {
+  opacity: 1;
+  visibility: visible;
+}
+
+#lightbox-image {
+  animation: zoomIn 0.25s ease;
+}
+
+@keyframes zoomIn {
+  from { transform: scale(0.95); opacity: 0; }
+  to { transform: scale(1); opacity: 1; }
+}
     
     /* ======================
        COMPONENTS - TAGS
@@ -1609,6 +1633,10 @@
         updateClock();
         setInterval(updateClock, 60000);
         await loadLinkedFolderOnStartup();
+        if (isAndroid()) {
+        console.log('📱 ANDROID MODE ACTIVE');
+        console.log('📁 Linked folder auto-load enabled');
+        }
       } catch (error) {
         handleError('Failed to initialize app', error);
       }
@@ -2309,54 +2337,57 @@ function dbUpdate(storeName, item) {
       `;
     }
     
-    async function renderGallery() {
-      const images = await dbGetAll('gallery');
-      
-      if (images.length === 0) {
-        return `
-          <div class="empty-state">
-            <div class="empty-state-icon">🖼️</div>
-            <h2 class="empty-state-title">No images in gallery</h2>
-            <p class="empty-state-description">Upload photos, screenshots, and visual documentation. Organize your visual memories.</p>
-            <button class="btn btn-primary" onclick="triggerFileUpload()">Upload Your First Image</button>
+   async function renderGallery() {
+  const images = await dbGetAll('gallery');
+  
+  if (images.length === 0) {
+    return `
+      <div class="empty-state">
+        <div class="empty-state-icon">🖼️</div>
+        <h2 class="empty-state-title">No images in gallery</h2>
+        <p class="empty-state-description">Upload photos, screenshots, and visual documentation. Organize your visual memories.</p>
+        <button class="btn btn-primary" onclick="triggerFileUpload()">Upload Your First Image</button>
+      </div>
+    `;
+  }
+  
+  images.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  
+  return `
+    <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
+      ${images.map(image => `
+        <div class="group cursor-pointer" onclick="openLightbox(${image.id})">
+          <div class="aspect-square bg-gray-100 rounded-lg overflow-hidden shadow-sm hover:shadow-md transition-shadow duration-200">
+            <img 
+              src="${image.dataUrl}" 
+              alt="${escapeHtml(image.title || image.filename)}"
+              class="w-full h-full object-cover"
+              loading="lazy"
+            >
           </div>
-        `;
-      }
-      
-      images.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-      
-      return `
-        <div class="grid grid-auto">
-          ${images.map(image => `
-            <div class="card" data-id="${image.id}">
-              <div class="relative">
-                <img 
-                  src="${image.dataUrl}" 
-                  alt="${escapeHtml(image.title || image.filename)}"
-                  class="w-full h-48 object-cover rounded-t-xl cursor-pointer"
-                  onclick="openLightbox(${image.id})"
-                  loading="lazy"
-                >
-              </div>
-              <div class="card-body">
-                <h3 class="card-title">${escapeHtml(image.title || image.filename)}</h3>
-                ${image.description ? `<p class="card-description">${escapeHtml(image.description)}</p>` : ''}
-                <div class="text-xs text-muted mt-3">
-                  ${formatDate(image.createdAt)}
-                </div>
-              </div>
-              <div class="card-footer">
-                <div class="card-actions">
-                  <button class="btn btn-sm btn-ghost" onclick="openLightbox(${image.id})">View</button>
-                  <button class="btn btn-sm btn-ghost" onclick="editImage(${image.id})">Edit</button>
-                  <button class="btn btn-sm btn-ghost" onclick="deleteImage(${image.id})">Delete</button>
-                </div>
-              </div>
-            </div>
-          `).join('')}
+          <div class="mt-2 text-xs text-center text-muted truncate px-1">
+            ${escapeHtml(image.title || image.filename)}
+          </div>
         </div>
-      `;
-    }
+      `).join('')}
+    </div>
+    
+    <!-- Lightbox Modal (Hidden by default) -->
+    <div id="lightbox-modal" class="fixed inset-0 bg-black bg-opacity-90 z-50 hidden flex items-center justify-center p-4" style="backdrop-filter: blur(2px);">
+      <div class="relative max-w-4xl max-h-full">
+        <img id="lightbox-image" class="max-w-full max-h-full rounded-lg shadow-2xl" />
+        <button 
+          class="absolute top-4 right-4 text-white text-2xl font-bold w-10 h-10 flex items-center justify-center bg-black bg-opacity-50 rounded-full hover:bg-opacity-70 transition" 
+          onclick="closeLightbox()"
+          aria-label="Close"
+        >
+          ×
+        </button>
+        <div id="lightbox-caption" class="absolute bottom-4 left-0 right-0 text-center text-white text-sm px-4"></div>
+      </div>
+    </div>
+  `;
+}
     
     function renderVault() {
       return `
@@ -4029,6 +4060,31 @@ async function writeFileToFolder(dirHandle, filename, blob) {
   await writable.close();
 }
 
+function updateFolderStatusUI() {
+  const el = document.getElementById('folder-status');
+  if (!el) return;
+  const btn = document.querySelector('button[onclick="linkLocalFolder()"]');
+  if (app.localFolderHandle) {
+    const name = app.localFolderHandle.name || 'Linked folder';
+    let androidBadge = '';
+    if (isAndroid()) {
+      androidBadge = ' <span style="color: var(--amber-500); font-weight: var(--font-weight-medium);">📱 (Android Mode)</span>';
+    }
+    el.innerHTML = `
+      <div class="font-medium">Status: Linked (${escapeHtml(name)})${androidBadge}</div>
+      <div class="text-sm text-muted">Automatic backup enabled</div>
+    `;
+    if (btn) btn.textContent = 'Unlink Local Folder';
+  } else {
+    el.innerHTML = `
+      <div class="font-medium">Status: Not linked</div>
+      <div class="text-sm text-muted">Link a folder to enable automatic backup</div>
+    `;
+    if (btn) btn.textContent = 'Link Local Folder';
+  }
+}
+
+
 async function linkLocalFolder() {
   try {
     // toggle/unlink if already linked
@@ -4056,6 +4112,7 @@ async function linkLocalFolder() {
     }
 
     await setSetting('localFolderHandle', dirHandle);
+    app.localFolderHandle = null; // Clear any previous handle first
     app.localFolderHandle = dirHandle;
     updateFolderStatusUI();
     showToast('Local folder linked successfully', 'success');
@@ -4093,6 +4150,9 @@ async function loadLinkedFolderOnStartup() {
 async function autoLoadAllItemsFromFolder() {
   if (!app.localFolderHandle) return;
 
+  let totalLoaded = 0;
+  let errors = 0;
+
   try {
     const entries = [];
     for await (const entry of app.localFolderHandle.values()) {
@@ -4101,20 +4161,26 @@ async function autoLoadAllItemsFromFolder() {
 
     // Load based on device type
     if (isAndroid()) {
-      // ANDROID: Look for files like note-123.json, bookmark-456.json, image-789.jpg, image-789.meta.json
       const metaMap = {};
 
       // First, load all .meta.json files
       for (const entry of entries) {
         if (entry.kind === 'file' && entry.name.endsWith('.meta.json')) {
-          const fileHandle = await app.localFolderHandle.getFileHandle(entry.name);
-          const file = await fileHandle.getFile();
-          const text = await file.text();
-          const meta = JSON.parse(text);
-          const idMatch = entry.name.match(/-(\d+)\.meta\.json$/);
-          if (idMatch) {
-            meta.id = parseInt(idMatch[1], 10);
-            metaMap[meta.id] = meta;
+          try {
+            const fileHandle = await app.localFolderHandle.getFileHandle(entry.name);
+            const file = await fileHandle.getFile();
+            const text = await file.text();
+            const meta = JSON.parse(text);
+            const idMatch = entry.name.match(/-(\d+)\.meta\.json$/);
+            if (idMatch && !isNaN(parseInt(idMatch[1], 10))) {
+              meta.id = parseInt(idMatch[1], 10);
+              metaMap[meta.id] = meta;
+            } else {
+              console.warn('Invalid meta filename:', entry.name);
+            }
+          } catch (err) {
+            console.warn('Failed to load meta file:', entry.name, err);
+            errors++;
           }
         }
       }
@@ -4122,34 +4188,46 @@ async function autoLoadAllItemsFromFolder() {
       // Load images + pair with metadata
       for (const entry of entries) {
         if (entry.kind === 'file' && !entry.name.endsWith('.meta.json') && entry.name.startsWith('image-')) {
-          const idMatch = entry.name.match(/^image-(\d+)(?:\..+)?$/);
-          if (idMatch) {
-            const id = parseInt(idMatch[1], 10);
-            const meta = metaMap[id];
-            if (meta) {
-              const fileHandle = await app.localFolderHandle.getFileHandle(entry.name);
-              const file = await fileHandle.getFile();
-              const arrayBuffer = await file.arrayBuffer();
-              const bytes = new Uint8Array(arrayBuffer);
-              let binary = '';
-              for (let i = 0; i < bytes.byteLength; i++) {
-                binary += String.fromCharCode(bytes[i]);
+          try {
+            const idMatch = entry.name.match(/^image-(\d+)(?:\..+)?$/);
+            if (idMatch && !isNaN(parseInt(idMatch[1], 10))) {
+              const id = parseInt(idMatch[1], 10);
+              const meta = metaMap[id];
+              if (meta) {
+                const fileHandle = await app.localFolderHandle.getFileHandle(entry.name);
+                const file = await fileHandle.getFile();
+                const arrayBuffer = await file.arrayBuffer();
+                const bytes = new Uint8Array(arrayBuffer);
+                let binary = '';
+                for (let i = 0; i < bytes.byteLength; i++) {
+                  binary += String.fromCharCode(bytes[i]);
+                }
+                const dataUrl = `data:${file.type};base64,${btoa(binary)}`;
+
+                const imageItem = {
+                  ...meta,
+                  dataUrl,
+                  filename: entry.name,
+                  mimeType: file.type,
+                  fileSize: file.size
+                };
+
+                try {
+                  await dbAdd('gallery', imageItem);
+                  totalLoaded++;
+                } catch (err) {
+                  if (err.name === 'ConstraintError') {
+                    await dbUpdate('gallery', imageItem);
+                    totalLoaded++;
+                  } else {
+                    throw err;
+                  }
+                }
               }
-              const dataUrl = `data:${file.type};base64,${btoa(binary)}`;
-
-              const imageItem = {
-                ...meta,
-                dataUrl,
-                filename: entry.name,
-                mimeType: file.type,
-                fileSize: file.size
-              };
-
-              await dbAdd('gallery', imageItem).catch(async (err) => {
-                console.warn(`Add failed, trying update for gallery ${imageItem.id}:`, err);
-                await dbUpdate('gallery', imageItem);
-              });
             }
+          } catch (err) {
+            console.warn('Failed to load image:', entry.name, err);
+            errors++;
           }
         }
       }
@@ -4157,26 +4235,42 @@ async function autoLoadAllItemsFromFolder() {
       // Load notes, bookmarks, arduino from flat files
       for (const entry of entries) {
         if (entry.kind === 'file' && entry.name.endsWith('.json') && !entry.name.endsWith('.meta.json')) {
-          const name = entry.name;
-          let storeName = null;
+          try {
+            const name = entry.name;
+            let storeName = null;
 
-          if (name.startsWith('note-')) storeName = 'notes';
-          else if (name.startsWith('bookmark-')) storeName = 'bookmarks';
-          else if (name.startsWith('arduino-')) storeName = 'arduino';
-          else continue;
+            if (name.startsWith('note-')) storeName = 'notes';
+            else if (name.startsWith('bookmark-')) storeName = 'bookmarks';
+            else if (name.startsWith('arduino-')) storeName = 'arduino';
+            else continue;
 
-          const fileHandle = await app.localFolderHandle.getFileHandle(entry.name);
-          const file = await fileHandle.getFile();
-          const text = await file.text();
-          const item = JSON.parse(text);
+            const fileHandle = await app.localFolderHandle.getFileHandle(entry.name);
+            const file = await fileHandle.getFile();
+            const text = await file.text();
+            const item = JSON.parse(text);
 
-          const idMatch = name.match(/-(\d+)\.json$/);
-          if (idMatch) {
-            item.id = parseInt(idMatch[1], 10);
-            await dbAdd(storeName, item).catch(async (err) => {
-              console.warn(`Add failed, trying update for ${storeName} ${item.id}:`, err);
-              await dbUpdate(storeName, item);
-            });
+            const idMatch = name.match(/-(\d+)\.json$/);
+            if (idMatch && !isNaN(parseInt(idMatch[1], 10))) {
+              item.id = parseInt(idMatch[1], 10);
+
+              try {
+                await dbAdd(storeName, item);
+                totalLoaded++;
+              } catch (err) {
+                if (err.name === 'ConstraintError') {
+                  await dbUpdate(storeName, item);
+                  totalLoaded++;
+                } else {
+                  throw err;
+                }
+              }
+            } else {
+              console.warn('Invalid ID in filename:', name);
+              errors++;
+            }
+          } catch (err) {
+            console.warn('Failed to load item:', entry.name, err);
+            errors++;
           }
         }
       }
@@ -4190,16 +4284,28 @@ async function autoLoadAllItemsFromFolder() {
           const folderHandle = await app.localFolderHandle.getDirectoryHandle(storeName, { create: false });
           for await (const entry of folderHandle.values()) {
             if (entry.kind === 'file' && entry.name.endsWith('.json')) {
-              const fileHandle = await folderHandle.getFileHandle(entry.name);
-              const file = await fileHandle.getFile();
-              const text = await file.text();
-              const item = JSON.parse(text);
+              try {
+                const fileHandle = await folderHandle.getFileHandle(entry.name);
+                const file = await fileHandle.getFile();
+                const text = await file.text();
+                const item = JSON.parse(text);
 
-              if (item.id) {
-                await dbAdd(storeName, item).catch(async (err) => {
-                  console.warn(`Add failed, trying update for ${storeName} ${item.id}:`, err);
-                  await dbUpdate(storeName, item);
-                });
+                if (item.id && !isNaN(item.id)) {
+                  try {
+                    await dbAdd(storeName, item);
+                    totalLoaded++;
+                  } catch (err) {
+                    if (err.name === 'ConstraintError') {
+                      await dbUpdate(storeName, item);
+                      totalLoaded++;
+                    } else {
+                      throw err;
+                    }
+                  }
+                }
+              } catch (err) {
+                console.warn(`Failed to load ${storeName} item:`, entry.name, err);
+                errors++;
               }
             }
           }
@@ -4215,11 +4321,16 @@ async function autoLoadAllItemsFromFolder() {
 
         for await (const entry of galleryFolder.values()) {
           if (entry.kind === 'file' && entry.name.endsWith('.meta.json')) {
-            const fileHandle = await galleryFolder.getFileHandle(entry.name);
-            const file = await fileHandle.getFile();
-            const text = await file.text();
-            const meta = JSON.parse(text);
-            metaMap[meta.id] = meta;
+            try {
+              const fileHandle = await galleryFolder.getFileHandle(entry.name);
+              const file = await fileHandle.getFile();
+              const text = await file.text();
+              const meta = JSON.parse(text);
+              metaMap[meta.id] = meta;
+            } catch (err) {
+              console.warn('Failed to load gallery meta:', entry.name, err);
+              errors++;
+            }
           }
         }
 
@@ -4229,28 +4340,40 @@ async function autoLoadAllItemsFromFolder() {
             const meta = metaMap[fileId];
 
             if (meta) {
-              const fileHandle = await galleryFolder.getFileHandle(entry.name);
-              const file = await fileHandle.getFile();
-              const arrayBuffer = await file.arrayBuffer();
-              const bytes = new Uint8Array(arrayBuffer);
-              let binary = '';
-              for (let i = 0; i < bytes.byteLength; i++) {
-                binary += String.fromCharCode(bytes[i]);
+              try {
+                const fileHandle = await galleryFolder.getFileHandle(entry.name);
+                const file = await fileHandle.getFile();
+                const arrayBuffer = await file.arrayBuffer();
+                const bytes = new Uint8Array(arrayBuffer);
+                let binary = '';
+                for (let i = 0; i < bytes.byteLength; i++) {
+                  binary += String.fromCharCode(bytes[i]);
+                }
+                const dataUrl = `data:${file.type};base64,${btoa(binary)}`;
+
+                const imageItem = {
+                  ...meta,
+                  dataUrl,
+                  filename: entry.name,
+                  mimeType: file.type,
+                  fileSize: file.size
+                };
+
+                try {
+                  await dbAdd('gallery', imageItem);
+                  totalLoaded++;
+                } catch (err) {
+                  if (err.name === 'ConstraintError') {
+                    await dbUpdate('gallery', imageItem);
+                    totalLoaded++;
+                  } else {
+                    throw err;
+                  }
+                }
+              } catch (err) {
+                console.warn('Failed to load gallery image:', entry.name, err);
+                errors++;
               }
-              const dataUrl = `data:${file.type};base64,${btoa(binary)}`;
-
-              const imageItem = {
-                ...meta,
-                dataUrl,
-                filename: entry.name,
-                mimeType: file.type,
-                fileSize: file.size
-              };
-
-              await dbAdd('gallery', imageItem).catch(async (err) => {
-                console.warn(`Add failed, trying update for gallery ${imageItem.id}:`, err);
-                await dbUpdate('gallery', imageItem);
-              });
             }
           }
         }
@@ -4266,39 +4389,21 @@ async function autoLoadAllItemsFromFolder() {
       loadSection(app.currentSection);
     }
 
-    showToast('✅ Loaded all items from folder', 'success');
+    if (totalLoaded > 0) {
+      showToast(`✅ Loaded ${totalLoaded} items from folder`, 'success');
+    }
+    if (errors > 0) {
+      showToast(`⚠️ ${errors} items failed to load`, 'warning');
+    }
+    if (totalLoaded === 0 && errors === 0) {
+      showToast('ℹ️ No items found to load', 'info');
+    }
 
   } catch (err) {
-    console.error('Failed to auto-load from folder:', err);
-    showToast('⚠️ Failed to load some items', 'error');
+    console.error('Critical failure in autoLoadAllItemsFromFolder:', err);
+    showToast('❌ Critical error loading folder', 'error');
   }
 }
-
-
-function updateFolderStatusUI() {
-  const el = document.getElementById('folder-status');
-  if (!el) return;
-  const btn = document.querySelector('button[onclick="linkLocalFolder()"]');
-  if (app.localFolderHandle) {
-    const name = app.localFolderHandle.name || 'Linked folder';
-    let androidBadge = '';
-    if (isAndroid()) {
-androidBadge = ' <span style="color: var(--amber-500); font-weight: var(--font-weight-medium);">📱 (Android Mode)</span>';
-    }
-    el.innerHTML = `
-      <div class="font-medium">Status: Linked (${escapeHtml(name)})${androidBadge}</div>
-      <div class="text-sm text-muted">Automatic backup enabled</div>
-    `;
-    if (btn) btn.textContent = 'Unlink Local Folder';
-  } else {
-    el.innerHTML = `
-      <div class="font-medium">Status: Not linked</div>
-      <div class="text-sm text-muted">Link a folder to enable automatic backup</div>
-    `;
-    if (btn) btn.textContent = 'Link Local Folder';
-  }
-}
-
 
 // expose so onclick in HTML can call it
 window.linkLocalFolder = linkLocalFolder;
@@ -4872,69 +4977,38 @@ function openLightbox(id) {
       return;
     }
 
-    const modal = document.getElementById('modal-backdrop');
-    const title = document.getElementById('modal-title');
-    const body = document.getElementById('modal-body');
-    const footer = document.getElementById('modal-footer');
+    const modal = document.getElementById('lightbox-modal');
+    const imgEl = document.getElementById('lightbox-image');
+    const captionEl = document.getElementById('lightbox-caption');
 
-    title.textContent = image.title || image.filename;
-    body.innerHTML = `
-      <div style="text-align: center;">
-        <img src="${image.dataUrl}" alt="${escapeHtml(image.title || image.filename)}"
-             style="max-width: 100%; max-height: 70vh; border-radius: var(--radius-lg);">
-        ${image.description ? `<p class="mt-4">${escapeHtml(image.description)}</p>` : ''}
-        <div class="text-sm text-muted mt-4">
-          ${formatDate(image.createdAt)}
-          ${image.fileSize ? ` • ${(image.fileSize / 1024).toFixed(1)} KB` : ''}
-        </div>
-      </div>
-    `;
+    imgEl.src = image.dataUrl;
+    imgEl.alt = image.title || image.filename;
+    captionEl.textContent = image.title || image.filename;
 
-    footer.style.display = 'flex';
-    footer.innerHTML = `
-      <button class="btn btn-ghost" onclick="hideModal()">Close</button>
-    `;
+    modal.classList.remove('hidden');
 
-    showModal();
+    // Close if user clicks outside image
+    modal.onclick = (e) => {
+      if (e.target === modal) {
+        closeLightbox();
+      }
+    };
+
+    // Close on Escape key
+    document.addEventListener('keydown', handleLightboxEscape);
+
   }).catch(err => handleError('Failed to load image', err));
 }
 
-async function editImage(id) {
-  try {
-    const image = await dbGet('gallery', id);
-    if (!image) {
-      showToast('Image not found', 'error');
-      return;
-    }
+function closeLightbox() {
+  const modal = document.getElementById('lightbox-modal');
+  modal.classList.add('hidden');
+  document.removeEventListener('keydown', handleLightboxEscape);
+}
 
-    const title = document.getElementById('modal-title');
-    const body = document.getElementById('modal-body');
-    const footer = document.getElementById('modal-footer');
-
-    title.textContent = 'Edit Image';
-    body.innerHTML = `
-      <form id="edit-image-form">
-        <div class="input-group">
-          <label for="edit-image-title" class="input-label">Title</label>
-          <input type="text" id="edit-image-title" class="input" value="${escapeHtml(image.title || image.filename.replace(/\.[^/.]+$/, ''))}">
-        </div>
-        <div class="input-group">
-          <label for="edit-image-description" class="input-label">Description</label>
-          <textarea id="edit-image-description" class="input textarea" rows="3">${escapeHtml(image.description || '')}</textarea>
-        </div>
-      </form>
-    `;
-
-    footer.style.display = 'flex';
-    footer.innerHTML = `
-      <button class="btn btn-ghost" onclick="hideModal()">Cancel</button>
-      <button class="btn btn-primary" onclick="updateImage(${id})">Update Image</button>
-    `;
-
-    showModal();
-    document.getElementById('edit-image-title').focus();
-  } catch (error) {
-    handleError('Failed to load image for editing', error);
+function handleLightboxEscape(e) {
+  if (e.key === 'Escape') {
+    closeLightbox();
   }
 }
 
